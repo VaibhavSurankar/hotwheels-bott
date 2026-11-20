@@ -1,14 +1,44 @@
 import json
 import os
+import re
 from html import escape
 from typing import Any
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urljoin
 
 import requests
 
 
+def load_local_env(path: str = "local_env.json") -> None:
+    """Load secrets from a local file (used when running on a phone/PC)."""
+    try:
+        with open(path, encoding="utf-8") as env_file:
+            data = json.load(env_file)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    for key, value in data.items():
+        if not isinstance(value, str):
+            value = json.dumps(value)
+        os.environ.setdefault(key, value)
+
+
+load_local_env()
+
 STATE_FILE = os.environ.get("STATE_FILE", "listing_state.json")
 SEARCH_TERM = os.environ.get("SEARCH_TERM", "hot wheels")
+
+REAL_BRANDS = [
+    "ferrari", "porsche", "mazda", "honda", "toyota", "nissan", "bmw",
+    "mercedes", "audi", "volkswagen", "vw", "ford", "chevrolet", "chevy",
+    "lamborghini", "pagani", "bugatti", "mclaren", "aston martin",
+    "alfa romeo", "subaru", "mitsubishi", "dodge", "jeep", "pontiac",
+    "volvo", "renault", "bentley", "koenigsegg", "jaguar", "land rover",
+    "maserati", "lexus", "mini",
+]
+
+
+def has_real_brand(title: str) -> bool:
+    lowered = title.lower()
+    return any(re.search(rf"\b{re.escape(brand)}\b", lowered) for brand in REAL_BRANDS)
 
 
 def json_env(name: str, default: Any) -> Any:
@@ -26,7 +56,7 @@ def location_values() -> dict[str, str]:
     latitude = os.environ.get("DELIVERY_LATITUDE")
     longitude = os.environ.get("DELIVERY_LONGITUDE")
     if not latitude or not longitude:
-        raise RuntimeError("DELIVERY_LATITUDE and DELIVERY_LONGITUDE are required secrets")
+        raise RuntimeError("DELIVERY_LATITUDE and DELIVERY_LONGITUDE are required")
     return {"LATITUDE": latitude, "LONGITUDE": longitude, "SEARCH_TERM": SEARCH_TERM}
 
 
@@ -40,15 +70,6 @@ def replace_placeholders(value: Any, values: dict[str, str]) -> Any:
     if isinstance(value, dict):
         return {key: replace_placeholders(item, values) for key, item in value.items()}
     return value
-
-
-def shopify_search_url(store_url: str) -> str:
-    query = urlencode({
-        "q": SEARCH_TERM,
-        "resources[type]": "product",
-        "resources[limit]": 10,
-    })
-    return f"{store_url.rstrip('/')}/search/suggest.json?{query}"
 
 
 def load_state() -> dict[str, dict[str, Any]]:
@@ -71,7 +92,7 @@ def save_state(state: dict[str, dict[str, Any]]) -> None:
 
 
 def product_available(product: dict[str, Any]) -> bool:
-    for key in ("available", "is_available", "in_stock"):
+    for key in ("available", "is_available", "in_stock", "InStock", "isInStock"):
         if key in product:
             value = product[key]
             if isinstance(value, str):
@@ -96,9 +117,15 @@ def extract_products(value: Any, provider: str, default_url: str) -> list[dict[s
             for product in extract_products(item, provider, default_url):
                 products[product["id"]] = product
     elif isinstance(value, dict):
-        product_id = value.get("product_id") or value.get("item_id") or value.get("variant_id")
+        product_id = (
+            value.get("product_id") or value.get("item_id") or value.get("variant_id")
+            or value.get("ProductID") or value.get("productId")
+        )
         product_id = product_id or value.get("id")
-        title = value.get("name") or value.get("title") or value.get("product_name")
+        title = (
+            value.get("name") or value.get("title") or value.get("product_name")
+            or value.get("PNm") or value.get("productName")
+        )
         if product_id is not None and isinstance(title, str) and SEARCH_TERM.lower() in title.lower():
             product = {
                 "id": f"{provider}:{product_id}",
@@ -132,6 +159,8 @@ def check_provider(config: dict[str, Any], values: dict[str, str]) -> tuple[bool
         response = request(url, headers=headers, json=body if method == "POST" else None, timeout=20)
         response.raise_for_status()
         products = extract_products(response.json(), name, config.get("default_url", url))
+        if config.get("brand_filter"):
+            products = [p for p in products if has_real_brand(p["title"])]
         available_count = sum(product["available"] for product in products)
         print(
             f"{name}: request succeeded ({response.status_code}); "
@@ -150,7 +179,6 @@ def providers() -> list[dict[str, Any]]:
     return [
         {
             "name": "Blinkit",
-            "enabled": False,
             "url": os.environ.get(
                 "BLINKIT_SEARCH_URL",
                 "https://blinkit.com/v1/layout/search?q=hot+wheels",
@@ -162,7 +190,6 @@ def providers() -> list[dict[str, Any]]:
         },
         {
             "name": "Zepto",
-            "enabled": False,
             "url": os.environ.get("ZEPTO_SEARCH_URL"),
             "headers": json_env("ZEPTO_HEADERS", {}),
             "method": os.environ.get("ZEPTO_METHOD", "GET"),
@@ -178,18 +205,13 @@ def providers() -> list[dict[str, Any]]:
             "default_url": "https://www.swiggy.com/instamart",
         },
         {
-            "name": "Krazy Caterpillar",
-            "url": shopify_search_url("https://krazycaterpillar.com"),
-            "headers": {"Accept": "application/json"},
-            "method": "GET",
-            "default_url": "https://krazycaterpillar.com",
-        },
-        {
-            "name": "Toycra",
-            "url": shopify_search_url("https://toycra.com"),
-            "headers": {"Accept": "application/json"},
-            "method": "GET",
-            "default_url": "https://toycra.com",
+            "name": "FirstCry",
+            "url": os.environ.get("FIRSTCRY_SEARCH_URL"),
+            "headers": json_env("FIRSTCRY_HEADERS", {}),
+            "method": os.environ.get("FIRSTCRY_METHOD", "GET"),
+            "body": json_env("FIRSTCRY_BODY", {}),
+            "default_url": "https://www.firstcry.com",
+            "brand_filter": True,
         },
     ]
 
