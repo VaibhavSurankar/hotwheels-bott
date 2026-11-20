@@ -1,0 +1,43 @@
+name: FirstCry Hot Wheels
+
+on:
+  schedule:
+    - cron: "*/30 1-17 * * *"   # ~06:30-23:30 IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firstcry
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests playwright
+
+      - run: playwright install --with-deps chromium
+
+      - name: Run FirstCry tracker
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python firstcry_bot.py
+
+      - name: Save seen products
+        run: |
+          if [ -f firstcry_seen.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -f firstcry_seen.json
+            git diff --cached --quiet || (git commit -m "chore: update firstcry seen [skip ci]" && git push)
+          fi
