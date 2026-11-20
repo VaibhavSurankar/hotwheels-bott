@@ -2,3 +2,5 @@ __pycache__/
 *.py[cod]
 .env
 listing_state.json.tmp
+local_env.json
+listing_state.json
